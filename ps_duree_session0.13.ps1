@@ -1,23 +1,38 @@
-# =========================
-# CONFIGURATION & RÉPERTOIRES
-# =========================
 Add-Type -AssemblyName System.Drawing
 
-$PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
-Set-Location $PSScriptRoot
+# =========================
+# FONCTIONS
+# =========================
 
-$InDir  = Join-Path $PSScriptRoot "in"
-$OutDir = Join-Path $PSScriptRoot "out"
-$InCsv  = Join-Path $InDir "security.csv"
-$OutCsv = Join-Path $OutDir "duree.csv"
-$OutImg = Join-Path $OutDir "sessions.png"
-
-# Création des dossiers si absents
-foreach ($dir in @($InDir, $OutDir)) {
-    if (-not (Test-Path $dir)) { 
-        New-Item -ItemType Directory -Force -Path $dir | Out-Null 
-        Write-Host "Dossier créé : $dir" -ForegroundColor Cyan
+function Get-LogonTypeName {
+    param($type)
+    
+    # On force en string et on vire les espaces
+    $val = [string]$type
+    
+    # On cherche le premier groupe de chiffres dans la chaine
+    if ($val -match '(\d+)') {
+        $cleanType = $matches[1] # On récupère juste le chiffre trouvé
+    } else {
+        return "N/A ($val)" # On affiche la valeur brute pour débugger si on ne trouve pas de chiffre
     }
+
+    $map = @{
+        "0"  = "System"
+        "2"  = "Interactive"
+        "3"  = "Network"
+        "4"  = "Batch"
+        "5"  = "Service"
+        "7"  = "Unlock"
+        "10" = "RDP"
+        "11" = "Cached"
+    }
+    
+    if ($map.ContainsKey($cleanType)) { 
+        return "$cleanType ($($map[$cleanType]))" 
+    }
+    
+    return "Type $cleanType"
 }
 
 function Get-ReadableDuration {
@@ -30,42 +45,84 @@ function Get-ReadableDuration {
 }
 
 # =========================
-# LECTURE DU FICHIER SOURCE
+# CONFIGURATION
+# =========================
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+$PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
+Set-Location $PSScriptRoot
+
+$InDir  = Join-Path $PSScriptRoot "in"
+$OutDir = Join-Path $PSScriptRoot "out"
+$InCsv  = Join-Path $InDir "security.csv"
+#$OutCsv = Join-Path $OutDir "duree.csv"
+#$OutImg = Join-Path $OutDir "sessions.png"
+$OutCsv = Join-Path $OutDir "duree_$($timestamp).csv"
+$OutImg = Join-Path $OutDir "sessions_$($timestamp).png"
+
+
+foreach ($dir in @($InDir, $OutDir)) {
+    if (-not (Test-Path $dir)) { 
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null 
+    }
+}
+
+# =========================
+# LECTURE SOURCE
 # =========================
 if (-not (Test-Path $InCsv)) { 
-    Write-Host "ERREUR : Fichier '$InCsv' manquant." -ForegroundColor Red
+    Write-Host "ERREUR : Fichier security.csv manquant dans le dossier /in" -ForegroundColor Red
     exit 
 }
 $events = Import-Csv $InCsv
-$machineName = $events[0].Computer
-if (-not $machineName) { $machineName = "Inconnue" }
+$machineName = if ($events[0].Computer) { $events[0].Computer } else { "Inconnue" }
 
-$userInput = Read-Host "Entrez une date/heure de référence (ex: 2023-10-25 14:30:00) ou laissez vide"
+$userInput = Read-Host "Entrez une date de reference (YYYY-MM-DD HH:MM:SS) ou Entree"
 $targetDate = $null
 if (-not [string]::IsNullOrWhiteSpace($userInput)) {
-    try { $targetDate = [datetime]$userInput } catch { Write-Warning "Format de date invalide." }
+    try { $targetDate = [datetime]$userInput } catch { Write-Warning "Format date invalide." }
 }
 
 # =========================
-# CONSTRUCTION DES SESSIONS
+# ANALYSE
 # =========================
 $sessions = @{}
+
+# Liste des comptes systeme a ignorer pour clarifier le graphique
+$systemNoise = @("UMFD-0", "UMFD-1", "DWM-1", "DWM-2", "DWM-3", "SERVICE LOCAL", "SERVICE RÉSEAU", "SYSTEM")
+
+# Filtrage : On ne garde que si le UserName n'est pas dans la liste noire
+$events = $events | Where-Object { 
+    $u = $_.UserName.ToUpper()
+    $isSystem = $false
+    foreach($noise in $systemNoise) {
+        if ($u -like "*$noise*") { $isSystem = $true; break }
+    }
+    -not $isSystem
+}
+
+
 foreach ($e in $events) {
     $logonId = if ($e.LogonId) { $e.LogonId } else { $e.PayloadData1 }
     $time = if ($e.TimeCreated) { [datetime]$e.TimeCreated } else { $null }
+    
     if (-not $logonId -or -not $time) { continue }
     
-    if ($e.EventId -eq "4624") {
-        if (-not $sessions.ContainsKey($logonId)) {
-            $workstation = $e.RemoteHost, $e.WorkstationName, $e.PayloadData11 | Where-Object { $_ -and $_ -ne "-" } | Select-Object -First 1
-            $sessions[$logonId] = [PSCustomObject]@{ 
-                LogonId = $logonId
-                Start   = $time
-                End     = $null
-                Host    = if ($workstation) { $workstation } else { "N/A" }
-            }
+if ($e.EventId -eq "4624") {
+    if (-not $sessions.ContainsKey($logonId)) {
+        
+        # Capture de la valeur brute de la colonne identifiée
+        $rawLogonData = $e.PayloadData2 
+        
+        $sessions[$logonId] = [PSCustomObject]@{ 
+            LogonId   = $logonId
+            Start     = $time
+            End       = $null
+            Host      = $e.RemoteHost
+            LogonType = Get-LogonTypeName $rawLogonData
         }
     }
+}
     elseif ($e.EventId -eq "4634" -and $sessions.ContainsKey($logonId)) {
         if (-not $sessions[$logonId].End) { $sessions[$logonId].End = $time }
     }
@@ -73,23 +130,25 @@ foreach ($e in $events) {
 $sessionList = $sessions.Values | Sort-Object Start
 
 # =========================
-# EXPORT CSV (CORRIGÉ)
+# EXPORT CSV
 # =========================
 $sessionList | ForEach-Object {
     $d = if ($_.End) { ($_.End - $_.Start) } else { $null }
     [PSCustomObject]@{
-        LogonId = $_.LogonId
-        Host    = $_.Host
-        Start   = $_.Start.ToString("yyyy-MM-dd HH:mm:ss")
-        End     = if ($_.End) { $_.End.ToString("yyyy-MM-dd HH:mm:ss") } else { "OPEN" }
-        Duree   = Get-ReadableDuration $d
+        LogonId   = $_.LogonId
+        LogonType = $_.LogonType
+        Host      = $_.Host
+        Start     = $_.Start.ToString("yyyy-MM-dd HH:mm:ss")
+        End       = if ($_.End) { $_.End.ToString("yyyy-MM-dd HH:mm:ss") } else { "OPEN" }
+        Duree     = Get-ReadableDuration $d
     }
 } | Export-Csv $OutCsv -NoTypeInformation -Encoding UTF8 -Force
 
 # =========================
-# GÉNÉRATION IMAGE
+# DESSIN IMAGE
 # =========================
-if ($sessionList.Count -eq 0) { Write-Warning "Aucune session."; exit }
+if ($sessionList.Count -eq 0) { Write-Warning "Aucune session trouvee."; exit }
+
 $allDates = $sessionList | ForEach-Object { $_.Start; if ($_.End) { $_.End } }
 if ($targetDate) { $allDates += $targetDate }
 $minTime = ($allDates | Measure-Object -Minimum).Minimum
@@ -111,25 +170,24 @@ $penBlack = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 2)
 $penR  = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 2); $penR.DashStyle = 2
 $brushP = [System.Drawing.Brushes]::BlueViolet
 
-# Dessin Légende & Barre
 $gfx.DrawString("Timeline Sessions - Machine: $machineName", $fontB, [System.Drawing.Brushes]::Black, 15, 15)
 $gfx.FillRectangle([System.Drawing.Brushes]::SteelBlue, 15, 45, 20, 10)
-$gfx.DrawString("Session Complète", $font, [System.Drawing.Brushes]::Black, 40, 42)
+$gfx.DrawString("Session Complete", $font, [System.Drawing.Brushes]::Black, 40, 42)
 $gfx.FillRectangle([System.Drawing.Brushes]::Orange, 15, 65, 20, 10)
 $gfx.DrawString("Session Ouverte", $font, [System.Drawing.Brushes]::Black, 40, 62)
 $gfx.FillRectangle($brushP, 15, 85, 10, 10)
-$gfx.DrawString("Session Ultra-courte (< 1 min)", $font, [System.Drawing.Brushes]::Black, 40, 82)
+$gfx.DrawString("Session courte (< 1 min)", $font, [System.Drawing.Brushes]::Black, 40, 82)
 $gfx.DrawLine($penBlack, $leftTextEnd + 5, $top - 30, $leftTextEnd + 5, $height - 40)
 
 $y = $top
 foreach ($s in $sessionList) {
     $gfx.DrawLine($penS, 10, $y + 75, $width - 20, $y + 75)
     $startStr = $s.Start.ToString("dd/MM HH:mm:ss")
-    $endStr   = if ($s.End) { $s.End.ToString("dd/MM HH:mm:ss") } else { "En cours" }
+    $endStr   = if ($s.End) { $s.End.ToString("dd/MM HH:mm:ss") } else { "OPEN" }
     $durTs    = if ($s.End) { ($s.End - $s.Start) } else { $null }
-    $durStr   = if ($s.End) { Get-ReadableDuration $durTs } else { "En cours..." }
-    
-    $infoText = "ID: $($s.LogonId)`nHost: $($s.Host)`nDurée: $durStr`n[$startStr -> $endStr]"
+    $durStr   = if ($s.End) { Get-ReadableDuration $durTs } else { "..." }
+#    $infoText = "ID: $($s.LogonId)`n      $($s.LogonType)`nHost: $($s.Host)`nDuree: $durStr`n[$startStr -> $endStr]"
+     $infoText = "ID: $($s.LogonId)`nType: $($s.LogonType)`nHost: $($s.Host)`nDuree: $durStr`n[$startStr -> $endStr]"
     $gfx.DrawString($infoText, $font, [System.Drawing.Brushes]::Black, 15, $y - 45) 
     
     $x1 = $leftGraph + ((($s.Start - $minTime).TotalSeconds / $totalSeconds) * ($width - $leftGraph - 80))
@@ -143,7 +201,6 @@ foreach ($s in $sessionList) {
     $y += $rowH
 }
 
-# Ligne Cible
 if ($targetDate) {
     $xT = $leftGraph + ((($targetDate - $minTime).TotalSeconds / $totalSeconds) * ($width - $leftGraph - 80))
     $gfx.DrawLine($penR, $xT, $top - 30, $xT, $height - 40)
@@ -153,6 +210,5 @@ if ($targetDate) {
 $bmp.Save($OutImg, [System.Drawing.Imaging.ImageFormat]::Png)
 $gfx.Dispose(); $bmp.Dispose()
 
-Write-Host "`n? Terminé." -ForegroundColor Green
-
-Write-Host "Fichiers disponibles dans : $OutDir" -ForegroundColor White
+Write-Host "Termine avec succes." -ForegroundColor Green
+Write-Host "Resultats dans le dossier : $OutDir" -ForegroundColor White
