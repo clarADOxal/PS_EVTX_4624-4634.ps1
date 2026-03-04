@@ -1,6 +1,8 @@
 # =========================
-# CONFIGURATION & RÉPERTOIRES
+# CONFIGURATION & RÃ‰PERTOIRES
 # =========================
+Add-Type -AssemblyName System.Drawing
+
 $PSScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $PSScriptRoot
 
@@ -10,11 +12,11 @@ $InCsv  = Join-Path $InDir "security.csv"
 $OutCsv = Join-Path $OutDir "duree.csv"
 $OutImg = Join-Path $OutDir "sessions.png"
 
-# Création des dossiers si absents
+# CrÃ©ation des dossiers si absents
 foreach ($dir in @($InDir, $OutDir)) {
     if (-not (Test-Path $dir)) { 
         New-Item -ItemType Directory -Force -Path $dir | Out-Null 
-        Write-Host "Dossier créé : $dir" -ForegroundColor Cyan
+        Write-Host "Dossier crÃ©Ã© : $dir" -ForegroundColor Cyan
     }
 }
 
@@ -38,7 +40,7 @@ $events = Import-Csv $InCsv
 $machineName = $events[0].Computer
 if (-not $machineName) { $machineName = "Inconnue" }
 
-$userInput = Read-Host "Entrez une date/heure de référence (ex: 2023-10-25 14:30:00) ou laissez vide"
+$userInput = Read-Host "Entrez une date/heure de rÃ©fÃ©rence (ex: 2023-10-25 14:30:00) ou laissez vide"
 $targetDate = $null
 if (-not [string]::IsNullOrWhiteSpace($userInput)) {
     try { $targetDate = [datetime]$userInput } catch { Write-Warning "Format de date invalide." }
@@ -71,7 +73,7 @@ foreach ($e in $events) {
 $sessionList = $sessions.Values | Sort-Object Start
 
 # =========================
-# EXPORT CSV (CORRIGÉ)
+# EXPORT CSV (CORRIGÃ‰)
 # =========================
 $sessionList | ForEach-Object {
     $d = if ($_.End) { ($_.End - $_.Start) } else { $null }
@@ -85,7 +87,7 @@ $sessionList | ForEach-Object {
 } | Export-Csv $OutCsv -NoTypeInformation -Encoding UTF8 -Force
 
 # =========================
-# GÉNÉRATION IMAGE
+# GÃ‰NÃ‰RATION IMAGE
 # =========================
 if ($sessionList.Count -eq 0) { Write-Warning "Aucune session."; exit }
 $allDates = $sessionList | ForEach-Object { $_.Start; if ($_.End) { $_.End } }
@@ -109,10 +111,10 @@ $penBlack = New-Object System.Drawing.Pen([System.Drawing.Color]::Black, 2)
 $penR  = New-Object System.Drawing.Pen([System.Drawing.Color]::Red, 2); $penR.DashStyle = 2
 $brushP = [System.Drawing.Brushes]::BlueViolet
 
-# Dessin Légende & Barre
+# Dessin LÃ©gende & Barre
 $gfx.DrawString("Timeline Sessions - Machine: $machineName", $fontB, [System.Drawing.Brushes]::Black, 15, 15)
 $gfx.FillRectangle([System.Drawing.Brushes]::SteelBlue, 15, 45, 20, 10)
-$gfx.DrawString("Session Complète", $font, [System.Drawing.Brushes]::Black, 40, 42)
+$gfx.DrawString("Session ComplÃ¨te", $font, [System.Drawing.Brushes]::Black, 40, 42)
 $gfx.FillRectangle([System.Drawing.Brushes]::Orange, 15, 65, 20, 10)
 $gfx.DrawString("Session Ouverte", $font, [System.Drawing.Brushes]::Black, 40, 62)
 $gfx.FillRectangle($brushP, 15, 85, 10, 10)
@@ -127,7 +129,7 @@ foreach ($s in $sessionList) {
     $durTs    = if ($s.End) { ($s.End - $s.Start) } else { $null }
     $durStr   = if ($s.End) { Get-ReadableDuration $durTs } else { "En cours..." }
     
-    $infoText = "ID: $($s.LogonId)`nHost: $($s.Host)`nDurée: $durStr`n[$startStr -> $endStr]"
+    $infoText = "ID: $($s.LogonId)`nHost: $($s.Host)`nDurÃ©e: $durStr`n[$startStr -> $endStr]"
     $gfx.DrawString($infoText, $font, [System.Drawing.Brushes]::Black, 15, $y - 45) 
     
     $x1 = $leftGraph + ((($s.Start - $minTime).TotalSeconds / $totalSeconds) * ($width - $leftGraph - 80))
@@ -151,5 +153,6 @@ if ($targetDate) {
 $bmp.Save($OutImg, [System.Drawing.Imaging.ImageFormat]::Png)
 $gfx.Dispose(); $bmp.Dispose()
 
-Write-Host "`n? Terminé." -ForegroundColor Green
+Write-Host "`n? TerminÃ©." -ForegroundColor Green
+
 Write-Host "Fichiers disponibles dans : $OutDir" -ForegroundColor White
