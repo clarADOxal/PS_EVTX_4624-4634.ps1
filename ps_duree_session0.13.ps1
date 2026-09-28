@@ -72,6 +72,7 @@ foreach ($dir in @($InDir, $OutDir)) {
 # =========================
 if (-not (Test-Path $InCsv)) { 
     Write-Host "ERREUR : Fichier security.csv manquant dans le dossier /in" -ForegroundColor Red
+    Sleep
     exit 
 }
 $events = Import-Csv $InCsv
